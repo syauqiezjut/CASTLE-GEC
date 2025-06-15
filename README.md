@@ -12,13 +12,23 @@ Comprehensive Dataset: IGED dataset with 1.55M Indonesian error-correction pairs
 
 ## Datasets
 
-![Alt text](Figure_1-3.pdf)
 <p align="center">
-  <img src="assets/Figure_1-3.pdf" alt="CASTLE Architecture" width="800"/>
+  <img src="assets/Figure_1-3.png" alt="IGED Architecture"/>
   <br>
-  <em>Figure 1: CASTLE model architecture overview</em>
+  <em>Architecture of the IGED error-generation framework. (a) Framework overview showing expert knowledge integration. (b) Rule-based error-generation pipeline for three linguistic categories. (c) LLM-driven prompts for semantic error generation.</em>
 </p>
+
+Download .csv file here:
+https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=sharing
+
+## Architecture
+<p align="center">
+  <img src="assets/Figure_2-3.png" alt="CASTLE Architecture"/>
+  <br>
+  <em>CASTLE Model with KG-Gated Linked Attention. It integrates layer-wise linked attention and knowledge-graph-based semantic gating to correct context-sensitive grammatical errors.</em>
+</p>
+
+Checkpoint Model:
 https://drive.google.com/file/d/15qIQ3tZfyR5MXwDvOOjv4CV8R-BYCS0N/view?usp=sharing
 
-Performance
-ModelF1 ScoreBLEUParametersBaseline (Whitespace)0.893473.69718.2MWordPiece Baseline0.957992.3027.0MBART-large0.959290.83406.0MCASTLE0.962992.7234.7M
+
