@@ -1,0 +1,90 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from fairseq.modules import MultiheadAttention
+
+class AdaptiveLinkedAttention(MultiheadAttention):
+    """Enhanced Linked Attention with adaptive gating and error-aware selection"""
+    
+    def __init__(self, embed_dim, num_heads, kdim=None, vdim=None, dropout=0.0, bias=True,
+                 add_bias_kv=False, add_zero_attn=False, self_attention=False,
+                 encoder_decoder_attention=False):
+        super().__init__(embed_dim, num_heads, kdim, vdim, dropout, bias,
+                        add_bias_kv, add_zero_attn, self_attention,
+                        encoder_decoder_attention)
+        
+        # Adaptive gate untuk mengontrol informasi dari layer sebelumnya
+        self.adaptive_gate = nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.Sigmoid()
+        )
+        
+        # Error detection module - untuk mendeteksi apakah token butuh koreksi
+        self.error_detector = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim // 2),
+            nn.LayerNorm(embed_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(embed_dim // 2, 1),
+            nn.Sigmoid()
+        )
+        
+        # Context-aware projection untuk linked information
+        self.context_proj = nn.Linear(embed_dim, embed_dim)
+        
+        # Layer normalization untuk stabilitas
+        self.link_norm = nn.LayerNorm(embed_dim)
+        
+        # Learnable parameters untuk different error types
+        self.morphological_weight = nn.Parameter(torch.ones(1) * 0.6)
+        self.syntactic_weight = nn.Parameter(torch.ones(1) * 0.7)
+        self.semantic_weight = nn.Parameter(torch.ones(1) * 0.8)
+        
+        self.prev_layer_output = None
+        
+    def set_prev_layer(self, prev_attention):
+        """Set reference to previous layer for linked attention"""
+        self.prev_attention = prev_attention
+    
+    def forward(self, query, key, value, key_padding_mask=None, incremental_state=None,
+                need_weights=True, static_kv=False, attn_mask=None, before_softmax=False,
+                need_head_weights=False):
+        
+        # Standard attention computation
+        attn_output, attn_weights = super().forward(
+            query, key, value, key_padding_mask, incremental_state,
+            need_weights, static_kv, attn_mask, before_softmax, need_head_weights
+        )
+        
+        # Jika tidak ada previous layer, return standard output
+        if not hasattr(self, 'prev_attention') or self.prev_layer_output is None:
+            self.prev_layer_output = attn_output
+            return attn_output, attn_weights
+        
+        # Error detection - predict which tokens need correction
+        error_scores = self.error_detector(query.transpose(0, 1))  # [batch, seq, 1]
+        error_mask = (error_scores > 0.5).float()  # Binary mask for error tokens
+        
+        # Context-aware processing of previous layer output
+        prev_context = self.context_proj(self.prev_layer_output)
+        prev_context = self.link_norm(prev_context)
+        
+        # Adaptive gating - combine current and previous representations
+        combined_input = torch.cat([attn_output, prev_context], dim=-1)
+        gate = self.adaptive_gate(combined_input.transpose(0, 1))  # [batch, seq, embed]
+        gate = gate.transpose(0, 1)  # Back to [seq, batch, embed]
+        
+        # Apply error-aware weighting
+        error_weights = error_mask.transpose(0, 1) * self.semantic_weight + \
+                       (1 - error_mask.transpose(0, 1)) * self.morphological_weight
+        
+        # Enhanced combination dengan error-aware weighting
+        enhanced_output = attn_output + gate * prev_context * error_weights
+        
+        # Update previous layer output for next layer
+        self.prev_layer_output = enhanced_output.detach()
+        
+        return enhanced_output, attn_weights
