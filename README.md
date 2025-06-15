@@ -13,6 +13,11 @@ Comprehensive Dataset: IGED dataset with 1.55M Indonesian error-correction pairs
 ## Datasets
 
 ![Alt text](Figure_1-3.pdf)
+<p align="center">
+  <img src="assets/Figure_1-3.pdf" alt="CASTLE Architecture" width="800"/>
+  <br>
+  <em>Figure 1: CASTLE model architecture overview</em>
+</p>
 https://drive.google.com/file/d/15qIQ3tZfyR5MXwDvOOjv4CV8R-BYCS0N/view?usp=sharing
 
 Performance
