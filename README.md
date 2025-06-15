@@ -18,8 +18,9 @@ Comprehensive Dataset: IGED dataset with 1.55M Indonesian error-correction pairs
   <em>Architecture of the IGED error-generation framework. (a) Framework overview showing expert knowledge integration. (b) Rule-based error-generation pipeline for three linguistic categories. (c) LLM-driven prompts for semantic error generation.</em>
 </p>
 
-Download .csv file here:
-https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=sharing
+Download here:
+<p>.csv file : https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=sharing</p>
+<p>data-bin-wordpiece: https://drive.google.com/file/d/14bqsDSGA8ZMgWJvwui6gAMag6zXIzB-b/view?usp=sharing</p>
 
 ## Architecture
 <p align="center">
@@ -31,4 +32,11 @@ https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=shari
 Checkpoint Model:
 https://drive.google.com/file/d/15qIQ3tZfyR5MXwDvOOjv4CV8R-BYCS0N/view?usp=sharing
 
+## Results
+
+<p align="center">
+  <img src="results/results.png" alt="CASTLE results"/>
+  <br>
+  <em>Performance Metrics for Different Tokenization Schemes and Model Architectures.</em>
+</p>
 
