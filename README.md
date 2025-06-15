@@ -11,6 +11,8 @@ Efficient Architecture: 91.5% fewer parameters than BART-large while maintaining
 Comprehensive Dataset: IGED dataset with 1.55M Indonesian error-correction pairs
 
 ## Datasets
+
+![Alt text](Figure_1-3.pdf)
 https://drive.google.com/file/d/15qIQ3tZfyR5MXwDvOOjv4CV8R-BYCS0N/view?usp=sharing
 
 Performance
