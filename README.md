@@ -19,7 +19,7 @@ Comprehensive Dataset: IGED dataset with 1.55M Indonesian error-correction pairs
 </p>
 
 Download here:
-<p>.csv file : https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=sharing</p>
+<!--p>.csv file : https://drive.google.com/file/d/1IEOyjOXPostQq_GEhWdvnqHpRaWKZZA_/view?usp=sharing</p-->
 <p>data-bin-wordpiece: https://drive.google.com/file/d/14bqsDSGA8ZMgWJvwui6gAMag6zXIzB-b/view?usp=sharing</p>
 
 ## Architecture
