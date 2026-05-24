@@ -161,19 +161,19 @@ def levenshtein_sim(a: str, b: str) -> float:
 # DeepSeek R1 neural analysis (Algorithm 1, Stage 3)
 # ──────────────────────────────────────────────
 
-DEEPSEEK_PROMPT_TEMPLATE = """You are an Indonesian linguistics expert analyzing grammar error correction pairs.
-Analyze the following {k} error-correction pairs for {category} errors:
+DEEPSEEK_PROMPT_TEMPLATE = """You are an Indonesian linguistics expert.
+Analyze these {k} error-correction pairs. Respond ONLY with a JSON array, no explanation outside JSON.
 
+Pairs:
 {pairs_json}
 
-For each pair, provide:
-1. alternatives: list of 2-3 alternative correct words/phrases (empty list if none)
-2. confidence: float 0-1 indicating correction confidence
-3. relation_type: one of ["corrected_as_diksi", "corrected_as_ambigu", "corrected_as_pleonasme"]
-4. explanation: brief linguistic explanation (1 sentence)
+Return exactly this format (one object per pair):
+[{{"pair_id":0,"alternatives":["word1","word2"],"confidence":0.85,"relation_type":"corrected_as_diksi"}},{{"pair_id":1,...}}]
 
-Respond ONLY with a JSON array of objects with keys: pair_id, alternatives, confidence, relation_type, explanation.
-"""
+relation_type must be one of: corrected_as_diksi, corrected_as_ambigu, corrected_as_pleonasme
+confidence: 0.0-1.0
+alternatives: 1-3 other valid corrections (can be empty list [])
+Output ONLY the JSON array, nothing else."""
 
 
 def batch_deepseek_analysis(
@@ -222,21 +222,57 @@ def batch_deepseek_analysis(
             pairs_json=json.dumps(pairs_data, ensure_ascii=False, indent=2),
         )
 
+        def _fallback_results(n, cat):
+            rel = CATEGORY_TO_RELATION.get(cat, ("corrected_as_diksi", 0.80))[0]
+            return [{"pair_id": i, "alternatives": [],
+                     "confidence": 0.5, "relation_type": rel}
+                    for i in range(n)]
+
+        def _extract_json(text: str):
+            """Robustly extract JSON array from response, even if truncated."""
+            text = text.strip()
+            # Strip markdown fences
+            if "```" in text:
+                parts = text.split("```")
+                for p in parts:
+                    p = p.strip()
+                    if p.startswith("json"):
+                        p = p[4:]
+                    if p.startswith("["):
+                        text = p.strip()
+                        break
+            # Find JSON array boundaries
+            start = text.find("[")
+            if start == -1:
+                return None
+            # Try full parse first
+            try:
+                return json.loads(text[start:])
+            except json.JSONDecodeError:
+                pass
+            # Try to recover truncated JSON — extract complete objects
+            import re
+            objects = re.findall(r'\{[^{}]+\}', text[start:])
+            results = []
+            for obj in objects:
+                try:
+                    results.append(json.loads(obj))
+                except Exception:
+                    pass
+            return results if results else None
+
         for attempt in range(max_retries):
             try:
                 response = client.chat.completions.create(
-                    model="deepseek-reasoner",   # DeepSeek R1
+                    model="deepseek-chat",   # faster + better JSON than R1
                     messages=[{"role": "user", "content": prompt}],
-                    temperature=0.1,
-                    max_tokens=2000,
+                    temperature=0.0,
+                    max_tokens=1024,
                 )
-                content = response.choices[0].message.content.strip()
-                # Strip markdown fences if present
-                if content.startswith("```"):
-                    content = content.split("```")[1]
-                    if content.startswith("json"):
-                        content = content[4:]
-                batch_results = json.loads(content)
+                content = response.choices[0].message.content or ""
+                batch_results = _extract_json(content)
+                if batch_results is None:
+                    raise ValueError(f"Could not extract JSON from: {content[:200]}")
                 all_results.extend(batch_results)
                 break
             except Exception as e:
@@ -245,16 +281,7 @@ def batch_deepseek_analysis(
                     time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Skipping batch after {max_retries} failures")
-                    # Add empty results as fallback
-                    for i in range(len(batch)):
-                        all_results.append({
-                            "pair_id": i,
-                            "alternatives": [],
-                            "confidence": 0.5,
-                            "relation_type": CATEGORY_TO_RELATION.get(
-                                category, ("corrected_as_diksi", 0.80)
-                            )[0],
-                        })
+                    all_results.extend(_fallback_results(len(batch), category))
 
     return all_results
 
