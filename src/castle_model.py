@@ -470,8 +470,7 @@ class CASTLE(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
             elif isinstance(module, nn.Embedding):
-                nn.init.normal_(module.weight, mean=0, std=d_model ** -0.5
-                                 if hasattr(self, "d_model") else 0.02)
+                nn.init.normal_(module.weight, mean=0, std=self.d_model ** -0.5)
                 if module.padding_idx is not None:
                     module.weight.data[module.padding_idx].zero_()
         # Gate params already initialized to 0.3 in their __init__
