@@ -181,16 +181,19 @@ def batch_deepseek_analysis(
     api_key: str,
     batch_size: int = 10,
     max_retries: int = 3,
+    cache_dir: Optional[str] = None,
 ) -> List[Dict]:
     """
-    Call DeepSeek R1 API to analyze semantic error-correction pairs.
+    Call DeepSeek API to analyze semantic error-correction pairs.
     Algorithm 1, lines 15-26 (Stage 3: Neural semantic relations).
+    Saves per-batch cache so interrupted runs can resume.
 
     Args:
         pairs: List of (error_word, correct_word, category) tuples
         api_key: DeepSeek API key
         batch_size: Batch size k=10 (as in paper)
         max_retries: Retry attempts on API error
+        cache_dir: Directory to save per-batch cache files (enables resume)
 
     Returns:
         List of dicts with: pair_id, alternatives, confidence, relation_type
@@ -203,13 +206,46 @@ def batch_deepseek_analysis(
     client = OpenAI(
         api_key=api_key,
         base_url="https://api.deepseek.com",
+        timeout=60.0,   # hard timeout — prevents ssl.recv() hanging forever
     )
 
-    all_results = []
+    if cache_dir:
+        os.makedirs(cache_dir, exist_ok=True)
 
-    for batch_start in range(0, len(pairs), batch_size):
+    all_results = []
+    total_batches = (len(pairs) + batch_size - 1) // batch_size
+
+    # Count already-cached batches for accurate progress display
+    cached_count = 0
+    api_count = 0
+
+    pbar = tqdm(
+        range(0, len(pairs), batch_size),
+        total=total_batches,
+        desc="DeepSeek batches",
+        unit="batch",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] {postfix}",
+    )
+    pbar.set_postfix(cached=0, api_calls=0, skip=0)
+
+    for batch_start in pbar:
         batch = pairs[batch_start: batch_start + batch_size]
         category = batch[0][2] if batch else "semantic"
+
+        # ── Per-batch cache: skip if already done ──
+        batch_cache_path = None
+        if cache_dir:
+            batch_key = hashlib.md5(
+                json.dumps(batch, ensure_ascii=False).encode()
+            ).hexdigest()[:10]
+            batch_cache_path = os.path.join(cache_dir, f"batch_{batch_key}.json")
+            if os.path.exists(batch_cache_path):
+                with open(batch_cache_path) as f:
+                    all_results.extend(json.load(f))
+                cached_count += 1
+                pbar.set_postfix(cached=cached_count, api_calls=api_count,
+                                 pairs_done=len(all_results))
+                continue   # already done, skip API call
 
         # Format pairs for prompt
         pairs_data = [
@@ -274,6 +310,13 @@ def batch_deepseek_analysis(
                 if batch_results is None:
                     raise ValueError(f"Could not extract JSON from: {content[:200]}")
                 all_results.extend(batch_results)
+                # ── Save per-batch cache immediately ──
+                if batch_cache_path:
+                    with open(batch_cache_path, "w") as f:
+                        json.dump(batch_results, f, ensure_ascii=False)
+                api_count += 1
+                pbar.set_postfix(cached=cached_count, api_calls=api_count,
+                                 pairs_done=len(all_results))
                 break
             except Exception as e:
                 logger.warning(f"DeepSeek API attempt {attempt+1} failed: {e}")
@@ -281,7 +324,15 @@ def batch_deepseek_analysis(
                     time.sleep(2 ** attempt)
                 else:
                     logger.error(f"Skipping batch after {max_retries} failures")
-                    all_results.extend(_fallback_results(len(batch), category))
+                    fallback = _fallback_results(len(batch), category)
+                    all_results.extend(fallback)
+                    # Save fallback to cache so we don't retry failed batches
+                    if batch_cache_path:
+                        with open(batch_cache_path, "w") as f:
+                            json.dump(fallback, f, ensure_ascii=False)
+                    api_count += 1
+                    pbar.set_postfix(cached=cached_count, api_calls=api_count,
+                                     pairs_done=len(all_results))
 
     return all_results
 
@@ -495,7 +546,9 @@ class CASTLEKnowledgeGraph:
                     neural_results = json.load(f)
             else:
                 neural_results = batch_deepseek_analysis(
-                    unique_sem_pairs, deepseek_api_key, batch_size=batch_size
+                    unique_sem_pairs, deepseek_api_key,
+                    batch_size=batch_size,
+                    cache_dir=cache_dir,  # enables per-batch resume
                 )
                 with open(cache_path, "w") as f:
                     json.dump(neural_results, f, ensure_ascii=False)
