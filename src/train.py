@@ -68,8 +68,8 @@ class LabelSmoothingCrossEntropy(nn.Module):
         targets: [B, T]
         """
         B, T, V = logits.shape
-        logits = logits.view(-1, V)         # [B*T, V]
-        targets = targets.view(-1)           # [B*T]
+        logits = logits.reshape(-1, V)      # [B*T, V]
+        targets = targets.reshape(-1)        # [B*T]
 
         # Ignore padding
         mask = targets != self.pad_idx
