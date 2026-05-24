@@ -37,13 +37,20 @@ PAD_TOKEN = "<pad>"
 UNK_TOKEN = "<unk>"
 
 ERROR_CATEGORY_MAP = {
-    "morphology": 0,
-    "syntax": 1,
-    "semantics": 2,
-    # Subcategories
+    # English names
+    "morphology": 0, "syntax": 1, "semantics": 2,
     "affixation": 0, "word_formation": 0, "reduplication": 0,
     "phrase_structure": 1, "preposition": 1, "sentence_completeness": 1,
     "diction": 2, "ambiguity": 2, "pleonasm": 2,
+    # Indonesian names (from IGED dataset)
+    "morfologi": 0, "sintaksis": 1, "semantik": 2,
+    "morfologi_afiksasi": 0, "morfologi_bentuk_kata": 0, "morfologi_reduplikasi": 0,
+    "sintaksis_frasa": 1, "sintaksis_preposisi": 1, "sintaksis_kelengkapan": 1,
+    "semantik_diksi": 2, "semantik_ambigu": 2, "semantik_pleonasme": 2,
+    # Short Indonesian variants
+    "afiksasi": 0, "bentuk_kata": 0, "reduplikasi": 0,
+    "frasa": 1, "preposisi": 1, "kelengkapan": 1,
+    "diksi": 2, "ambigu": 2, "pleonasme": 2,
 }
 
 SEMANTIC_SUBCATEGORIES = {"diction", "ambiguity", "pleonasm",
@@ -226,10 +233,11 @@ def load_iged(
     # Tries many variations for source / target / category columns
     SRC_COLS = ("source", "src", "incorrect", "error", "input",
                 "kalimat_salah", "salah", "noisy")
-    TGT_COLS = ("target", "tgt", "correct", "correction", "output",
+    TGT_COLS = ("target", "tgt", "trg", "correct", "correction", "output",
                 "kalimat_benar", "benar", "clean", "reference")
     CAT_COLS = ("category", "cat", "error_type", "type", "label",
                 "error_category", "kategori")
+    SPLIT_COLS = ("split", "set", "partition", "fold")
 
     def _resolve(ex: dict, candidates: tuple, default: str = "") -> str:
         for k in candidates:
@@ -295,15 +303,52 @@ def load_iged(
                         rows.append({"source": src, "target": tgt, "category": cat})
                 return rows
 
-            # Load all available splits
+            # Load all available splits into one pool first
             all_records = []
             for split_name, split_data in hf_data.items():
                 records = _to_records(split_data)
-                logger.info(f"  Split '{split_name}': {len(records):,} records")
+                logger.info(f"  HF split '{split_name}': {len(records):,} records")
                 all_records.extend(records)
 
-            samples_raw = all_records
-            train_records = val_records = test_records = None
+            # Check if there is a 'split' column to use for proper splitting
+            first_split = list(hf_data.values())[0]
+            has_split_col = len(first_split) > 0 and any(
+                k in first_split[0] for k in SPLIT_COLS
+            )
+
+            if has_split_col:
+                # Use the 'split' column directly
+                split_col = next(k for k in SPLIT_COLS if k in first_split[0])
+                logger.info(f"Found split column: '{split_col}' — using it for train/val/test")
+                train_records, val_records, test_records = [], [], []
+                for ex in first_split:
+                    src = _resolve(ex, SRC_COLS)
+                    tgt = _resolve(ex, TGT_COLS)
+                    cat = _resolve(ex, CAT_COLS, "syntax")
+                    if not src or not tgt:
+                        continue
+                    record = {"source": src, "target": tgt, "category": cat}
+                    split_val = str(ex.get(split_col, "train")).lower().strip()
+                    if split_val in ("train", "training"):
+                        train_records.append(record)
+                    elif split_val in ("val", "valid", "validation", "dev"):
+                        val_records.append(record)
+                    elif split_val in ("test", "testing", "eval"):
+                        test_records.append(record)
+                    else:
+                        train_records.append(record)  # default to train
+                logger.info(f"Split from column — train: {len(train_records):,}, "
+                            f"val: {len(val_records):,}, test: {len(test_records):,}")
+                # If val/test still empty after split col, do manual split
+                if len(val_records) == 0:
+                    logger.warning("'split' column has no val/test entries — doing manual split")
+                    samples_raw = train_records
+                    train_records = val_records = test_records = None
+                else:
+                    samples_raw = None  # already split
+            else:
+                samples_raw = all_records
+                train_records = val_records = test_records = None
 
         except Exception as e:
             raise RuntimeError(
@@ -312,8 +357,8 @@ def load_iged(
                 f"Original error: {e}"
             )
 
-    # ── Manual stratified split ────────────────────────────────
-    if "train_records" not in dir() or train_records is None:
+    # ── Manual stratified split (only if needed) ──────────────
+    if ("train_records" not in dir() or train_records is None) and samples_raw is not None:
         import random
         random.seed(seed)
         random.shuffle(samples_raw)

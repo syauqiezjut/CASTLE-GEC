@@ -71,8 +71,10 @@ CATEGORY_TO_RELATION = {
     "sentence_completeness": ("corrected_as_diksi", 0.80),
 }
 
-SEMANTIC_CATEGORIES = {"diksi", "diction", "ambigu", "ambiguity",
-                        "pleonasme", "pleonasm"}
+SEMANTIC_CATEGORIES = {
+    "diksi", "diction", "ambigu", "ambiguity", "pleonasme", "pleonasm",
+    "semantik_diksi", "semantik_ambigu", "semantik_pleonasme", "semantik",
+}
 
 
 # ──────────────────────────────────────────────
