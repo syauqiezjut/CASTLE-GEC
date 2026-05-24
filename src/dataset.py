@@ -222,55 +222,89 @@ def load_iged(
     logger.info("Loading IGED dataset")
     logger.info("=" * 60)
 
+    # ── Column name resolver ───────────────────────────────────
+    # Tries many variations for source / target / category columns
+    SRC_COLS = ("source", "src", "incorrect", "error", "input",
+                "kalimat_salah", "salah", "noisy")
+    TGT_COLS = ("target", "tgt", "correct", "correction", "output",
+                "kalimat_benar", "benar", "clean", "reference")
+    CAT_COLS = ("category", "cat", "error_type", "type", "label",
+                "error_category", "kategori")
+
+    def _resolve(ex: dict, candidates: tuple, default: str = "") -> str:
+        for k in candidates:
+            if k in ex and ex[k] is not None and str(ex[k]).strip():
+                return str(ex[k]).strip()
+            # case-insensitive fallback
+            for ek in ex:
+                if ek.lower() == k and ex[ek] is not None and str(ex[ek]).strip():
+                    return str(ex[ek]).strip()
+        return default
+
+    def _normalize_df_cols(df: pd.DataFrame) -> pd.DataFrame:
+        col_map = {}
+        for col in df.columns:
+            cl = col.lower().strip()
+            if cl in SRC_COLS:
+                col_map[col] = "source"
+            elif cl in TGT_COLS:
+                col_map[col] = "target"
+            elif cl in CAT_COLS:
+                col_map[col] = "category"
+        df = df.rename(columns=col_map)
+        logger.info(f"CSV columns after normalize: {list(df.columns)}")
+        return df
+
     # ── Load raw data ──────────────────────────────────────────
     if local_csv and os.path.exists(local_csv):
         logger.info(f"Loading from local CSV: {local_csv}")
         df = pd.read_csv(local_csv)
-        # Normalize column names
-        col_map = {}
-        for col in df.columns:
-            cl = col.lower().strip()
-            if cl in ("source", "src", "incorrect", "error", "input"):
-                col_map[col] = "source"
-            elif cl in ("target", "tgt", "correct", "correction", "output"):
-                col_map[col] = "target"
-            elif cl in ("category", "cat", "error_type", "type"):
-                col_map[col] = "category"
-        df = df.rename(columns=col_map)
+        logger.info(f"CSV columns (raw): {list(df.columns)}")
+        df = _normalize_df_cols(df)
+        if "source" not in df.columns or "target" not in df.columns:
+            raise ValueError(
+                f"Cannot find source/target columns in CSV.\n"
+                f"Columns found: {list(df.columns)}\n"
+                f"Expected one of: src={SRC_COLS}, tgt={TGT_COLS}"
+            )
         if "category" not in df.columns:
             df["category"] = "syntax"
-        samples_raw = df[["source", "target", "category"]].to_dict("records")
+        df = df[["source", "target", "category"]].dropna(subset=["source", "target"])
+        df = df[df["source"].str.strip().astype(bool) & df["target"].str.strip().astype(bool)]
+        samples_raw = df.to_dict("records")
+        logger.info(f"Valid samples after dropna: {len(samples_raw):,}")
     else:
         logger.info(f"Loading from HuggingFace: {hf_dataset_name}")
         try:
             hf_data = load_dataset(hf_dataset_name, cache_dir=cache_dir)
-            # If pre-split
-            if isinstance(hf_data, DatasetDict) and "train" in hf_data:
-                def _to_records(split):
-                    rows = []
-                    for ex in split:
-                        rows.append({
-                            "source": ex.get("source", ex.get("src", ex.get("incorrect", ""))),
-                            "target": ex.get("target", ex.get("tgt", ex.get("correct", ""))),
-                            "category": ex.get("category", ex.get("error_type", "syntax")),
-                        })
-                    return rows
-                train_records = _to_records(hf_data["train"])
-                val_records = _to_records(hf_data.get("validation", hf_data.get("val", [])))
-                test_records = _to_records(hf_data.get("test", []))
-                logger.info(f"Pre-split sizes — train: {len(train_records)}, "
-                            f"val: {len(val_records)}, test: {len(test_records)}")
-            else:
-                # Single split — do manual split below
-                split_data = hf_data["train"] if "train" in hf_data else list(hf_data.values())[0]
-                samples_raw = []
-                for ex in split_data:
-                    samples_raw.append({
-                        "source": ex.get("source", ex.get("src", "")),
-                        "target": ex.get("target", ex.get("tgt", "")),
-                        "category": ex.get("category", "syntax"),
-                    })
-                train_records = val_records = test_records = None
+            logger.info(f"HF dataset splits: {list(hf_data.keys())}")
+
+            # Show first example to debug column names
+            first_split = list(hf_data.values())[0]
+            if len(first_split) > 0:
+                ex0 = first_split[0]
+                logger.info(f"First example keys: {list(ex0.keys())}")
+
+            def _to_records(split):
+                rows = []
+                for ex in split:
+                    src = _resolve(ex, SRC_COLS)
+                    tgt = _resolve(ex, TGT_COLS)
+                    cat = _resolve(ex, CAT_COLS, "syntax")
+                    if src and tgt:
+                        rows.append({"source": src, "target": tgt, "category": cat})
+                return rows
+
+            # Load all available splits
+            all_records = []
+            for split_name, split_data in hf_data.items():
+                records = _to_records(split_data)
+                logger.info(f"  Split '{split_name}': {len(records):,} records")
+                all_records.extend(records)
+
+            samples_raw = all_records
+            train_records = val_records = test_records = None
+
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load {hf_dataset_name}. "
@@ -278,7 +312,7 @@ def load_iged(
                 f"Original error: {e}"
             )
 
-    # ── Manual stratified split if needed ─────────────────────
+    # ── Manual stratified split ────────────────────────────────
     if "train_records" not in dir() or train_records is None:
         import random
         random.seed(seed)
