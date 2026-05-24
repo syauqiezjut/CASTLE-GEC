@@ -1,0 +1,90 @@
+# CASTLE Base Configuration
+# Reproduces results from: ESWA 299 (2026) 130233
+
+model:
+  arch: castle_transformer
+  encoder_layers: 4
+  decoder_layers: 4
+  encoder_attention_heads: 8
+  decoder_attention_heads: 8
+  encoder_embed_dim: 256
+  decoder_embed_dim: 256
+  encoder_ffn_embed_dim: 2048
+  decoder_ffn_embed_dim: 2048
+  dropout: 0.3
+  attention_dropout: 0.1
+
+  # Linked Attention — initial gate values (learned during training)
+  # Paper reports: a = {0.3000, 0.1415, 0.1383, 0.1285} for layers 0-3
+  linked_attn_init: 0.3
+  linked_cross_attn_init: 0.3
+
+  # Knowledge Graph integration
+  kg_enabled: true
+  kg_confidence_threshold: 0.5   # c_learned in Eq. (5)
+  kg_epsilon: 0.1                # ε in Eq. (5)
+
+  # Knowledge-guided decoding bias weights ψ(r) — Eq. (8)
+  kg_bias_diksi: 0.15
+  kg_bias_ambigu: 0.12
+  kg_bias_pleonasm: 0.10
+  kg_bias_alternative: 0.05
+  kg_string_similarity_threshold: 0.8  # θ for edge matching
+
+  # Learned category weights (initialized, then optimized)
+  # Paper: w_diksi=0.9000, w_ambigu=0.8000, w_pleon=0.7000
+  w_diksi_init: 0.9
+  w_ambigu_init: 0.8
+  w_pleon_init: 0.7
+
+tokenizer:
+  type: wordpiece
+  vocab_size: 10000
+  # Whitespace tokenizer vocab: ~1M (for ablation)
+
+training:
+  optimizer: adam
+  beta1: 0.9
+  beta2: 0.98
+  lr: 5.0e-4
+  lr_scheduler: inverse_sqrt
+  warmup_updates: 4000
+  label_smoothing: 0.1
+  max_tokens: 1024
+  batch_size: 128
+  update_freq: 2
+  max_epochs: 10
+  patience: 5          # early stopping on val loss
+  fp16: true
+
+  # Loss weights — Eq. (9)
+  lambda_kg: 0.1
+  lambda_reg: 0.01
+
+dataset:
+  name: syauqie/IGED
+  train_split: 0.80
+  val_split: 0.10
+  test_split: 0.10
+
+knowledge_graph:
+  output_path: data/castle_kg.pkl
+  # Relation weights (Table 5)
+  relation_weights:
+    stem_of: 0.98
+    corrected_as_diksi: 0.80
+    corrected_as_ambigu: 0.82
+    corrected_as_pleonasme: 0.60
+    alternative: 0.50
+    collocates: 0.30
+  # Construction method ratios
+  rule_based_ratio: 0.60
+  neural_ratio: 0.40
+  # DeepSeek batch size for neural extraction
+  deepseek_batch_size: 10
+  # Statistical collocation params (Algorithm 1, line 29)
+  collocation_window: 3
+  collocation_threshold: 3
+  # Validation thresholds
+  levenshtein_threshold: 0.8    # string similarity for morphological linking
+  cosine_similarity_threshold: 0.6  # IndoBERT semantic consistency
