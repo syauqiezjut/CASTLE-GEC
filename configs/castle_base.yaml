@@ -1,5 +1,12 @@
 # CASTLE Base Configuration
 # Reproduces results from: ESWA 299 (2026) 130233
+#
+# Implementation notes (v2):
+#   - attention_dropout=0.1 (Fairseq default; original code)
+#   - clip_norm=0.1 (Fairseq default; applied in train.py)
+#   - lambda_kg=0, lambda_reg=0 (not used in original training)
+#   - Linked attention: MLP gate, pre-softmax, disabled during inference
+#   - Decoding: beam_size=5, length_penalty=0.6
 
 model:
   arch: castle_transformer
@@ -12,17 +19,17 @@ model:
   encoder_ffn_embed_dim: 2048
   decoder_ffn_embed_dim: 2048
   dropout: 0.3
-  attention_dropout: 0.1
+  attention_dropout: 0.1   # Fairseq default; original code uses 0.1
 
-  # Linked Attention — initial gate values (learned during training)
-  # Paper reports: a = {0.3000, 0.1415, 0.1383, 0.1285} for layers 0-3
+  # Linked Attention — MLP content-dependent gate (not scalar)
+  # Paper reports learned values: a = {0.3000, 0.1415, 0.1383, 0.1285} for layers 0-3
   linked_attn_init: 0.3
   linked_cross_attn_init: 0.3
 
   # Knowledge Graph integration
   kg_enabled: true
-  kg_confidence_threshold: 0.5   # c_learned in Eq. (5)
-  kg_epsilon: 0.1                # ε in Eq. (5)
+  # Note: KG encoder gate (Eq. 3-6) is NOT active — was placeholder in original code.
+  # Only KG logit bias at decoding (Eq. 8) is active.
 
   # Knowledge-guided decoding bias weights ψ(r) — Eq. (8)
   kg_bias_diksi: 0.15
@@ -31,16 +38,9 @@ model:
   kg_bias_alternative: 0.05
   kg_string_similarity_threshold: 0.8  # θ for edge matching
 
-  # Learned category weights (initialized, then optimized)
-  # Paper: w_diksi=0.9000, w_ambigu=0.8000, w_pleon=0.7000
-  w_diksi_init: 0.9
-  w_ambigu_init: 0.8
-  w_pleon_init: 0.7
-
 tokenizer:
   type: wordpiece
   vocab_size: 10000
-  # Whitespace tokenizer vocab: ~1M (for ablation)
 
 training:
   optimizer: adam
@@ -50,16 +50,22 @@ training:
   lr_scheduler: inverse_sqrt
   warmup_updates: 4000
   label_smoothing: 0.1
-  max_tokens: 1024
-  batch_size: 128
-  update_freq: 2
-  max_epochs: 10
-  patience: 5          # early stopping on val loss
+  max_tokens: 1024        # Fairseq binding constraint: ~40 samples per mini-batch
+  batch_size: 40          # 1024 tokens ÷ 25 avg tokens/sentence ≈ 40 samples
+  update_freq: 2          # effective gradient batch = 80 samples (matches paper)
+  max_epochs: 10          # 10 epochs × 15,087 steps/epoch ≈ 150,875 total steps
+  patience: 5
   fp16: true
+  clip_norm: 0.1          # Fairseq default gradient clipping
 
-  # Loss weights — Eq. (9)
-  lambda_kg: 0.1
-  lambda_reg: 0.01
+  # Auxiliary loss weights — set to 0 (not used in original training)
+  # Paper describes L_KG (Eq. 10) and L_reg (Eq. 11) but original code used L_CE only.
+  lambda_kg: 0.0
+  lambda_reg: 0.0
+
+  # Decoding hyperparameters (beam search)
+  beam_size: 5
+  length_penalty: 0.6
 
 dataset:
   name: syauqie/IGED
@@ -68,12 +74,12 @@ dataset:
   test_split: 0.10
 
 knowledge_graph:
-  output_path: data/castle_kg.pkl
+  output_path: data/castle_kg_pruned.pkl
   # Relation weights (Table 5)
   relation_weights:
-    stem_of: 0.98
+    stem_of: 1.0            # paper Table 5: weight 1.0
     corrected_as_diksi: 0.80
-    corrected_as_ambigu: 0.82
+    corrected_as_ambigu: 0.80  # paper Table 5: weight 0.80
     corrected_as_pleonasme: 0.60
     alternative: 0.50
     collocates: 0.30

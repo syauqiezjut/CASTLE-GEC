@@ -16,6 +16,9 @@ import os
 import json
 import logging
 from typing import Dict, List, Optional, Tuple
+
+# Must be set BEFORE any tokenizers import to allow safe multiprocessing fork
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 from pathlib import Path
 
 import torch
@@ -75,12 +78,12 @@ def build_wordpiece_tokenizer(
 
     if os.path.exists(vocab_file):
         logger.info(f"Loading existing tokenizer from {save_dir}")
-        tokenizer = BertWordPieceTokenizer(vocab_file, lowercase=False)
+        tokenizer = BertWordPieceTokenizer(vocab_file, lowercase=False, unk_token=UNK_TOKEN)
     else:
         assert train_files, "train_files required to train tokenizer from scratch"
         os.makedirs(save_dir, exist_ok=True)
         logger.info(f"Training WordPiece tokenizer (vocab_size={vocab_size})")
-        tokenizer = BertWordPieceTokenizer(lowercase=False)
+        tokenizer = BertWordPieceTokenizer(lowercase=False, unk_token=UNK_TOKEN)
         tokenizer.train(
             files=train_files,
             vocab_size=vocab_size,
@@ -416,23 +419,29 @@ def get_dataloaders(
     val_ds: IGEDDataset,
     test_ds: IGEDDataset,
     batch_size: int = 128,
-    num_workers: int = 4,
+    num_workers: int = 0,
     pad_id: int = 0,
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """Create DataLoaders for train, val, test splits."""
-    _collate = lambda batch: collate_fn(batch, pad_id=pad_id)
+    from functools import partial
+    # functools.partial is picklable (unlike lambda) — required for num_workers > 0
+    _collate = partial(collate_fn, pad_id=pad_id)
 
+    persistent = num_workers > 0  # keep workers alive between batches
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True,
-        num_workers=num_workers, collate_fn=_collate, pin_memory=True,
+        num_workers=num_workers, collate_fn=_collate,
+        pin_memory=True, persistent_workers=persistent,
     )
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, collate_fn=_collate, pin_memory=True,
+        num_workers=num_workers, collate_fn=_collate,
+        pin_memory=True, persistent_workers=persistent,
     )
     test_loader = DataLoader(
         test_ds, batch_size=batch_size, shuffle=False,
-        num_workers=num_workers, collate_fn=_collate, pin_memory=True,
+        num_workers=num_workers, collate_fn=_collate,
+        pin_memory=True, persistent_workers=persistent,
     )
     return train_loader, val_loader, test_loader
 

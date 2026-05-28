@@ -303,7 +303,7 @@ def batch_deepseek_analysis(
                     model="deepseek-chat",   # faster + better JSON than R1
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.0,
-                    max_tokens=1024,
+                    max_tokens=2048,
                 )
                 content = response.choices[0].message.content or ""
                 batch_results = _extract_json(content)
@@ -317,11 +317,23 @@ def batch_deepseek_analysis(
                 api_count += 1
                 pbar.set_postfix(cached=cached_count, api_calls=api_count,
                                  pairs_done=len(all_results))
+                # Polite inter-batch delay — avoid hammering API
+                time.sleep(0.5)
                 break
             except Exception as e:
+                err_str = str(e)
                 logger.warning(f"DeepSeek API attempt {attempt+1} failed: {e}")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)
+                    # 503 service busy → wait much longer before retry
+                    if "503" in err_str or "service_unavailable" in err_str:
+                        wait = 60 * (attempt + 1)   # 60s, 120s
+                        logger.warning(f"  Service busy — waiting {wait}s before retry...")
+                    elif "500" in err_str or "internal_error" in err_str:
+                        wait = 30 * (attempt + 1)   # 30s, 60s
+                        logger.warning(f"  Server error — waiting {wait}s before retry...")
+                    else:
+                        wait = 2 ** attempt          # 1s, 2s, 4s
+                    time.sleep(wait)
                 else:
                     logger.error(f"Skipping batch after {max_retries} failures")
                     fallback = _fallback_results(len(batch), category)
@@ -651,35 +663,43 @@ class CASTLEKnowledgeGraph:
         word: str,
         max_nodes: int = 20,
         similarity_threshold: float = 0.8,
+        use_fuzzy: bool = False,
     ) -> List[Tuple[str, str, str, float]]:
         """
         Retrieve relevant edges for a given word (Eq. 8 in paper).
-        Uses string similarity for matching (θ = 0.8).
+        Uses direct O(1) lookup by default. Fuzzy matching is optional
+        (use_fuzzy=True) but O(V) — too slow for training with large KGs.
 
         Returns:
             List of (src_node, dst_node, relation, weight) tuples
         """
         word_l = word.lower()
-        edges = []
 
-        # Direct match
+        # Gunakan fast lookup cache jika tersedia (O(1), tanpa networkx overhead)
+        if hasattr(self, "_fast_lookup"):
+            edges = list(self._fast_lookup.get(word_l, []))
+            if use_fuzzy and not edges:
+                # Fuzzy hanya jika tidak ada direct match dan eksplisit diminta
+                for node, node_edges in self._fast_lookup.items():
+                    if levenshtein_sim(word_l, node) >= similarity_threshold:
+                        edges.extend(node_edges)
+            edges = sorted(edges, key=lambda x: -x[3])[:max_nodes]
+            return edges
+
+        # Fallback ke networkx jika cache belum dibangun
+        edges = []
         candidate_nodes = set()
         if word_l in self.graph:
             candidate_nodes.add(word_l)
-
-        # Fuzzy match with similarity threshold
-        for node in self.graph.nodes():
-            if levenshtein_sim(word_l, node) >= similarity_threshold:
-                candidate_nodes.add(node)
-
-        # Collect edges from candidate nodes
+        if use_fuzzy:
+            for node in self.graph.nodes():
+                if levenshtein_sim(word_l, node) >= similarity_threshold:
+                    candidate_nodes.add(node)
         for node in candidate_nodes:
             for src, dst, data in self.graph.out_edges(node, data=True):
                 edges.append((src, dst, data.get("relation", ""), data.get("weight", 0.0)))
             for src, dst, data in self.graph.in_edges(node, data=True):
                 edges.append((src, dst, data.get("relation", ""), data.get("weight", 0.0)))
-
-        # Sort by weight descending, limit
         edges = sorted(edges, key=lambda x: -x[3])[:max_nodes]
         return edges
 
@@ -740,7 +760,32 @@ class CASTLEKnowledgeGraph:
             f"{kg.graph.number_of_nodes():,} nodes, "
             f"{kg.graph.number_of_edges():,} edges"
         )
+        # Bangun fast lookup dict sekali — O(1) per word, tanpa networkx overhead
+        logger.info("Building fast lookup cache...")
+        kg._build_fast_lookup()
+        logger.info("Fast lookup cache ready.")
         return kg
+
+    def _build_fast_lookup(self, max_edges_per_node: int = 20):
+        """
+        Precompute edge list per node menjadi plain Python dict.
+        Dipanggil sekali saat load — menggantikan networkx out_edges/in_edges
+        yang lambat saat dipanggil per-batch.
+        """
+        lookup = {}  # word -> sorted list of (src, dst, relation, weight)
+        for node in self.graph.nodes():
+            edges = []
+            for src, dst, data in self.graph.out_edges(node, data=True):
+                edges.append((src, dst,
+                               data.get("relation", ""),
+                               data.get("weight", 0.0)))
+            for src, dst, data in self.graph.in_edges(node, data=True):
+                edges.append((src, dst,
+                               data.get("relation", ""),
+                               data.get("weight", 0.0)))
+            edges.sort(key=lambda x: -x[3])
+            lookup[node] = edges[:max_edges_per_node]
+        self._fast_lookup = lookup
 
     def export_json(self, path: str, max_edges: int = 500_000):
         """Export KG as JSON for inspection/sharing."""

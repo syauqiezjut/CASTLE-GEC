@@ -136,6 +136,10 @@ class CASTLECorrector:
                 max_len=self.max_len,
                 bos_id=self.bos_id,
                 eos_id=self.eos_id,
+                beam_size=5,
+                length_penalty=1.0,
+                max_len_a=1.0,   # GEC: output length ≈ input length
+                max_len_b=3,     # allow up to src_len + 3 extra tokens
             )
 
         # Decode

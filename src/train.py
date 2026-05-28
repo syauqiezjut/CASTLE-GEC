@@ -34,8 +34,9 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 # Local imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -110,31 +111,37 @@ def compute_kg_loss(
         kg_edges = random.sample(kg_edges, subset_size)
 
     B, T, V = logits.shape
-    log_probs = F.log_softmax(logits, dim=-1)  # [B, T, V]
 
-    total_loss = torch.tensor(0.0, device=logits.device)
-    count = 0
+    # Eq. (10): L_KG gradients flow back to model (do NOT detach).
+    # Vectorized gather (below) keeps backward fast — no need to detach.
+    log_probs = F.log_softmax(logits.float(), dim=-1)  # [B, T, V], with grad
 
+    # Vectorized: build token_id list and weight list for all sampled edges at once
+    token_ids_list = []
+    weights_list   = []
     for (src_word, dst_word, relation, weight) in kg_edges:
-        # Encode destination word → token IDs
         try:
             enc = tokenizer.encode(dst_word)
-            token_ids = [tid for tid in enc.ids if tid != pad_idx and tid < V]
+            ids = [tid for tid in enc.ids if tid != pad_idx and tid < V]
         except Exception:
-            continue
+            ids = []
+        for tid in ids:
+            token_ids_list.append(tid)
+            weights_list.append(weight)
 
-        if not token_ids:
-            continue
+    if not token_ids_list:
+        return torch.tensor(0.0, device=logits.device)
 
-        for token_id in token_ids:
-            # Average log prob across all positions and batch items
-            token_log_prob = log_probs[:, :, token_id].mean()
-            total_loss = total_loss - weight * token_log_prob
-            count += 1
+    # Batch gather: log_probs[:, :, token_ids] → [B, T, N_edges]
+    idx = torch.tensor(token_ids_list, dtype=torch.long, device=logits.device)
+    w   = torch.tensor(weights_list,   dtype=torch.float32, device=logits.device)
 
-    if count > 0:
-        return total_loss / count
-    return torch.tensor(0.0, device=logits.device)
+    # [B, T, N] → mean over B and T → [N], then dot with weights
+    gathered = log_probs[:, :, idx]              # [B, T, N]
+    mean_lp  = gathered.mean(dim=(0, 1))         # [N]
+    l_kg     = -(w * mean_lp).mean()
+
+    return l_kg.to(logits.device)
 
 
 def compute_reg_loss(model: CASTLE) -> torch.Tensor:
@@ -175,21 +182,22 @@ def compute_reg_loss(model: CASTLE) -> torch.Tensor:
 
 class CASTLELoss(nn.Module):
     """
-    Combined CASTLE loss (Equation 9):
-      L = L_CE + λ_kg·L_KG + λ_reg·L_reg
+    CASTLE training loss: standard cross-entropy + label smoothing.
+
+    Note: Paper describes L_KG (Eq. 10) and L_reg (Eq. 11) as auxiliary losses,
+    but the original training code used only L_CE (label_smoothed_cross_entropy).
+    lambda_kg and lambda_reg are kept in the interface for reference but default to 0.
     """
     def __init__(
         self,
         vocab_size: int,
         pad_idx: int = 0,
         label_smoothing: float = 0.1,
-        lambda_kg: float = 0.1,
-        lambda_reg: float = 0.01,
+        lambda_kg: float = 0.0,   # NOT used in original training
+        lambda_reg: float = 0.0,  # NOT used in original training
     ):
         super().__init__()
         self.ce_loss = LabelSmoothingCrossEntropy(vocab_size, label_smoothing, pad_idx)
-        self.lambda_kg = lambda_kg
-        self.lambda_reg = lambda_reg
         self.pad_idx = pad_idx
 
     def forward(
@@ -200,31 +208,19 @@ class CASTLELoss(nn.Module):
         kg_edges: list = None,
         tokenizer=None,
     ) -> Dict[str, torch.Tensor]:
-        # Use KG-biased logits if available, else raw logits
+        # Use KG-biased logits (Eq. 8 applied during training too)
         logits = outputs.get("kg_logits", outputs["logits"])
 
-        # L_CE (Eq. 9 first term) — teacher forcing: predict tgt[1:] from tgt[:-1]
-        tgt_input = targets[:, :-1]   # [B, T-1]
+        # Teacher forcing: predict tgt[1:] from tgt[:-1]
         tgt_label = targets[:, 1:]    # [B, T-1]
-
-        logits_for_ce = logits[:, :tgt_label.size(1), :]  # align
+        logits_for_ce = logits[:, :tgt_label.size(1), :]
         l_ce = self.ce_loss(logits_for_ce, tgt_label)
 
-        # L_KG (Eq. 10)
-        l_kg = torch.tensor(0.0, device=logits.device)
-        if self.lambda_kg > 0 and kg_edges and tokenizer:
-            l_kg = compute_kg_loss(logits, kg_edges, tokenizer, self.pad_idx)
-
-        # L_reg (Eq. 11)
-        l_reg = compute_reg_loss(model) if self.lambda_reg > 0 else torch.tensor(0.0)
-
-        total = l_ce + self.lambda_kg * l_kg + self.lambda_reg * l_reg
-
         return {
-            "loss": total,
+            "loss": l_ce,
             "l_ce": l_ce.detach(),
-            "l_kg": l_kg.detach(),
-            "l_reg": l_reg.detach(),
+            "l_kg": torch.tensor(0.0),
+            "l_reg": torch.tensor(0.0),
         }
 
 
@@ -253,9 +249,12 @@ class InverseSqrtScheduler:
 
     def _get_lr(self) -> float:
         step = max(1, self._step)
-        scale = self.d_model ** -0.5
-        lr = scale * min(step ** -0.5, step * self.warmup_steps ** -1.5)
-        return lr * self.base_lr / (self.d_model ** -0.5)  # normalize to base_lr
+        # Linear warmup to base_lr, then inverse sqrt decay.
+        # Peak at step == warmup_steps → exactly base_lr (5e-4 per Table 8).
+        if step < self.warmup_steps:
+            return self.base_lr * step / self.warmup_steps
+        else:
+            return self.base_lr * (self.warmup_steps / step) ** 0.5
 
     def state_dict(self):
         return {"_step": self._step}
@@ -397,6 +396,7 @@ def train(cfg: Dict):
     train_loader, val_loader, test_loader = get_dataloaders(
         train_ds, val_ds, test_ds,
         batch_size=t_cfg.get("batch_size", 128),
+        num_workers=4,
         pad_id=pad_idx,
     )
 
@@ -420,6 +420,10 @@ def train(cfg: Dict):
     model = model.to(device)
 
     logger.info(f"Model parameters: {model.count_parameters():,}")
+
+    # Precompute token ID cache untuk KG nodes — eliminasi encode() dari inner loop
+    if kg:
+        model.build_token_id_cache(tokenizer, vocab_size=vocab_size, pad_idx=pad_idx)
 
     # ── Optimizer and Scheduler ────────────────────────────────
     optimizer = torch.optim.Adam(
@@ -449,13 +453,13 @@ def train(cfg: Dict):
         vocab_size=vocab_size,
         pad_idx=pad_idx,
         label_smoothing=t_cfg.get("label_smoothing", 0.1),
-        lambda_kg=t_cfg.get("lambda_kg", 0.1),
-        lambda_reg=t_cfg.get("lambda_reg", 0.01),
+        lambda_kg=0.0,   # not used in original training
+        lambda_reg=0.0,  # not used in original training
     )
 
     # ── FP16 ───────────────────────────────────────────────────
     use_fp16 = t_cfg.get("fp16", True) and torch.cuda.is_available()
-    scaler = GradScaler() if use_fp16 else None
+    scaler = GradScaler("cuda") if use_fp16 else None
     update_freq = t_cfg.get("update_freq", 2)
     max_epochs = t_cfg.get("max_epochs", 10)
     patience = t_cfg.get("patience", 5)
@@ -478,26 +482,45 @@ def train(cfg: Dict):
 
         optimizer.zero_grad()
 
-        for batch_idx, batch in enumerate(train_loader):
+        n_train_batches = len(train_loader)
+        pbar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch+1}/{max_epochs}",
+            unit="batch",
+            dynamic_ncols=True,
+        )
+
+        for batch_idx, batch in enumerate(pbar):
+            _profile = (batch_idx < 3)  # print timing for first 3 batches only
+            _t0 = time.time()
+
             src = batch["src_tokens"].to(device)
             tgt = batch["tgt_tokens"].to(device)
             mask = batch["src_mask"].to(device)
+            _t1 = time.time()
+
+            # KG edges — fast O(1) lookup via precomputed cache
+            # Compute per-sample edge lists once; reuse for both model bias and L_KG loss
             src_texts = batch["src_texts"]
+            kg_edges_per_sample = []  # List[List[edge]] — one list per batch item
+            kg_edges = []             # flat list for L_KG loss computation
+            if kg:
+                for txt in src_texts:
+                    sample_edges = kg.get_edge_set_for_sequence(txt.lower().split())
+                    kg_edges_per_sample.append(sample_edges)
+                    kg_edges.extend(sample_edges)
+            else:
+                kg_edges_per_sample = None
+            _t2 = time.time()
 
-            # Forward pass
-            with autocast(enabled=use_fp16):
-                outputs = model(src, tgt[:, :-1], mask, src_texts, tokenizer)
-
-                # Collect KG edges for this batch (for L_KG)
-                kg_edges = []
-                if kg:
-                    for txt in src_texts:
-                        kg_edges.extend(
-                            kg.get_edge_set_for_sequence(txt.lower().split())
-                        )
-
+            # Forward pass dengan KG bias (Eq. 8) sesuai paper
+            # kg_edges_per_sample avoids recomputing edges inside model._apply_kg_bias
+            with autocast("cuda", enabled=use_fp16):
+                outputs = model(src, tgt[:, :-1], mask,
+                                kg_edges_per_sample=kg_edges_per_sample)
                 losses = loss_fn(outputs, tgt, model, kg_edges, tokenizer)
                 loss = losses["loss"] / update_freq
+            _t3 = time.time()
 
             # Backward
             if use_fp16:
@@ -509,7 +532,8 @@ def train(cfg: Dict):
             if (batch_idx + 1) % update_freq == 0:
                 if use_fp16:
                     scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                # Fairseq default clip_norm=0.1
+                nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.1)
                 if use_fp16:
                     scaler.step(optimizer)
                     scaler.update()
@@ -520,27 +544,51 @@ def train(cfg: Dict):
                 optimizer.zero_grad()
                 global_step += 1
 
-                # Logging
+                # Logging to TensorBoard
                 if global_step % 100 == 0:
                     writer.add_scalar("train/loss", losses["loss"].item(), global_step)
                     writer.add_scalar("train/l_ce", losses["l_ce"].item(), global_step)
                     writer.add_scalar("train/l_kg", losses["l_kg"].item(), global_step)
                     writer.add_scalar("train/lr", lr, global_step)
 
+            _t4 = time.time()
+            if _profile:
+                logger.info(
+                    f"  [TIMING batch {batch_idx}] "
+                    f"data={_t1-_t0:.3f}s  "
+                    f"kg_lookup={_t2-_t1:.3f}s  "
+                    f"fwd+loss={_t3-_t2:.3f}s  "
+                    f"bwd={_t4-_t3:.3f}s  "
+                    f"total={_t4-_t0:.3f}s  "
+                    f"n_kg_edges={len(kg_edges)}"
+                )
+
             epoch_loss += losses["loss"].item()
             epoch_ce += losses["l_ce"].item()
             epoch_kg += losses["l_kg"].item()
             n_batches += 1
 
-            if n_batches % 500 == 0:
+            # Update tqdm postfix setiap batch
+            pbar.set_postfix({
+                "loss": f"{losses['loss'].item():.4f}",
+                "ce": f"{losses['l_ce'].item():.4f}",
+                "kg": f"{losses['l_kg'].item():.4f}",
+                "step": global_step,
+            })
+
+            # Log ke file setiap 50 batch
+            if n_batches % 50 == 0:
                 elapsed = time.time() - t0
                 logger.info(
-                    f"  Epoch {epoch+1} | step {global_step} | "
+                    f"  Epoch {epoch+1} | batch {n_batches}/{n_train_batches} | "
+                    f"step {global_step} | "
                     f"loss={epoch_loss/n_batches:.4f} | "
                     f"ce={epoch_ce/n_batches:.4f} | "
                     f"kg={epoch_kg/n_batches:.4f} | "
                     f"elapsed={elapsed:.0f}s"
                 )
+
+        pbar.close()
 
         # ── Validation ──────────────────────────────────────────
         val_metrics = validate(model, val_loader, loss_fn, tokenizer, device, max_batches=200)
