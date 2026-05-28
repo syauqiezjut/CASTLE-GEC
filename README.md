@@ -126,7 +126,6 @@ corrector = CASTLECorrector.from_checkpoint(
 
 # Single sentence
 print(corrector.correct("Saya sudah pergi ke sana kemarin hari."))
-# → "Saya sudah pergi ke sana kemarin."
 
 # Batch
 results = corrector.correct_batch([
