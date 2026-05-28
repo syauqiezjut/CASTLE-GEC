@@ -18,7 +18,7 @@ CASTLE is a sequence-to-sequence transformer model for correcting grammatical er
 
 The model is trained and evaluated on [IGED](https://huggingface.co/datasets/syauqie/IGED), a dataset of Indonesian grammatical errors covering morphological, syntactic, and semantic error categories.
 
-**Paper:** M. Syauqi Abdurrahman et al., *"CASTLE: Context-Aware Semantic Transformer with Knowledge Graph Enhancement for Indonesian Grammatical Error Correction"*, Expert Systems with Applications, Vol. 299 (2026), 130233. [https://doi.org/10.1016/j.eswa.2025.130233](https://doi.org/10.1016/j.eswa.2025.130233)
+**Paper:** Marier, Syauqie Muhammad et al., *"CASTLE: Context-Aware Semantic Transformer with Knowledge Graph Enhancement for Indonesian Grammatical Error Correction"*, Expert Systems with Applications, Vol. 299 (2026), 130233. [https://doi.org/10.1016/j.eswa.2025.130233](https://doi.org/10.1016/j.eswa.2025.130233)
 
 ---
 
