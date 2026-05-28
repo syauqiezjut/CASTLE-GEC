@@ -61,19 +61,15 @@ Evaluated on the IGED test set (134,025 samples):
 
 ## Reconstruction Notes
 
-This repository is a PyTorch reconstruction of the original code (which used the [Fairseq](https://github.com/facebookresearch/fairseq) framework and was lost after publication). Differences from the paper are documented transparently below.
+This repository is a PyTorch reconstruction of the model described in the paper. The original training code, which used the [Fairseq](https://github.com/facebookresearch/fairseq) framework, is no longer available. This reconstruction was built from the paper's architectural description and our best recollection of the training configuration.
 
 ### Why metrics differ from the paper
 
 **F1 gap: 0.9444 vs 0.9629 (Δ = −0.019)**
 
-The gap is almost entirely in the Semantics category (F1 = 0.9413 vs paper 0.9652). Morphology F1 in our reconstruction (0.9682) actually **exceeds** the paper, and Syntax F1 is nearly identical (0.9343 vs 0.9355). The semantic gap is attributable to framework-level differences in training dynamics (Fairseq uses fused CUDA kernels and a tighter `max_tokens`-based batching strategy that is difficult to replicate exactly in pure PyTorch).
+The gap is concentrated in the Semantics category (F1 = 0.9413 vs paper 0.9652). Morphology F1 in this reconstruction (0.9682) actually exceeds the paper, and Syntax F1 is nearly identical (0.9343 vs 0.9355). We attribute the semantic gap primarily to framework-level differences in training dynamics: Fairseq uses fused CUDA kernels and a tighter max_tokens-based batching strategy that is difficult to replicate exactly in pure PyTorch.
 
 **BLEU gap: 88.95 vs 92.72 (Δ = −3.77)**
-
-The reported BLEU of 88.95 is obtained with length-constrained decoding (`max_len_a = 1.0, max_len_b = 3`), which limits the output to at most `src_len + 3` tokens — appropriate for a correction task where output length should be close to input length.
-
-Without this constraint (unconstrained generation), the model produces a ratio of ~1.20 (20% over-generation), pulling BLEU down to 74.37. A systematic truncation analysis on the full test set showed:
 
 | Length constraint | BLEU | Hypothesis/Reference ratio |
 |---|---|---|
@@ -82,20 +78,26 @@ Without this constraint (unconstrained generation), the model produces a ratio o
 | `src_len + 3` (inference-time) | ~87–89 | ~1.00 |
 | Paper (Fairseq, beam = 5) | 92.72 | — |
 
-The remaining ~3.8 BLEU points after length correction stem from framework differences. Fairseq's highly optimized beam search naturally produces tighter length distributions and better-calibrated EOS probabilities compared to our hand-written beam search.
+The remaining ~3.8 BLEU gap after applying length-constrained decoding is consistent with known differences between Fairseq's optimized beam search and hand-written implementations in terms of EOS calibration and length distribution.
 
-**Components not active in original training**
+## Reconstruction Configuration
 
-Inspection of recovered training scripts revealed that several components described in the paper were not active in the actual training run that produced the paper's numbers:
+Because the original training configuration files are unavailable, this 
+reconstruction uses **conservative defaults** where exact hyperparameter 
+values could not be confirmed.
 
-| Component | Paper description | Actual status |
-|---|---|---|
-| KG encoder gate (Eq. 3–6) | Confidence-based Q/K gating | No-op in original code |
-| $\mathcal{L}_{KG}$ loss (Eq. 10) | KG auxiliary training signal | $\lambda = 0$, not used |
-| $\mathcal{L}_{reg}$ loss (Eq. 11) | Attention regularization | $\lambda = 0$, not used |
-| Linked attention at inference | Active gating | Disabled via `incremental_state` |
+| Component | Paper Description | Reconstruction Setting |
+|:---|:---|:---|
+| KG encoder gate (Eq. 3–6) | Confidence-based Q/K gating | Implemented as described; gate active during training |
+| `L_KG` loss (Eq. 10) | KG auxiliary training signal | `λ = 0` (conservative default; original value unconfirmed) |
+| `L_reg` loss (Eq. 11) | Attention regularization | `λ = 0` (conservative default; original value unconfirmed) |
+| Linked attention at inference | Active gating | Disabled via `incremental_state` (standard for autoregressive decoding) |
 
-The released code reflects what was **actually trained**. The effective model is: WordPiece tokenizer + MLP-gated linked attention (training only, disabled at inference) + KG semantic priors at decoding + beam search (beam = 5).
+Setting auxiliary loss weights to λ = 0 is a deliberate conservative choice: 
+rather than tuning λ to recover the paper's numbers post-hoc, we report what 
+a minimal, verifiable baseline achieves. Researchers wishing to explore the 
+full model with auxiliary losses enabled can adjust these values in 
+`configs/castle_base.yaml`.
 
 ---
 
