@@ -228,15 +228,19 @@ castle-gec/
 
 ```bibtex
 @article{castle2026,
-  title   = {{CASTLE}: Context-Aware Semantic Transformer with Knowledge Graph
-             Enhancement for Indonesian Grammatical Error Correction},
-  author  = {Abdurrahman, M. Syauqi and others},
-  journal = {Expert Systems with Applications},
-  volume  = {299},
-  pages   = {130233},
-  year    = {2026},
-  doi     = {10.1016/j.eswa.2025.130233}
+  title     = {{CASTLE}: Context-Aware Semantic Transformer with Knowledge Graph Enhancement for Low-Resource Grammar Correction},
+  author    = {Syauqie Muhammad Marier and Xiangjie Kong and Linan Zhu and Xiangfan Chen and Abdulloh Badruzzaman and I. Nyoman Apraz Ramatryana},
+  journal   = {Expert Systems with Applications},
+  volume    = {299},
+  number    = {Part D},
+  pages     = {130233},
+  year      = {2026},
+  doi       = {10.1016/j.eswa.2025.130233},
+  url       = {https://www.sciencedirect.com/science/article/pii/S0957417425038485},
+  issn      = {0957-4174},
+  keywords  = {Grammatical error correction, Low-resource language, Knowledge graph, Semantic error correction}
 }
+
 ```
 
 ---
